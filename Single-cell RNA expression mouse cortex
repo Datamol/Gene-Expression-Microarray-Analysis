@@ -1,0 +1,282 @@
+
+## https://www.bioconductor.org/help/workflows/simpleSingleCell/
+# A study of cell types in the mouse brain (Zeisel et al. 2015)
+
+
+source("https://bioconductor.org/biocLite.R")
+
+readFormat <- function(infile) { 
+  # First column is empty.
+  metadata <- read.delim(infile, stringsAsFactors=FALSE, header=FALSE, nrow=10)[,-1] 
+  rownames(metadata) <- metadata[,1]
+  metadata <- metadata[,-1]
+  metadata <- as.data.frame(t(metadata))
+  # First column after row names is some useless filler.
+  counts <- read.delim(infile, stringsAsFactors=FALSE, header=FALSE, row.names=1, skip=11)[,-1] 
+  counts <- as.matrix(counts)
+  return(list(metadata=metadata, counts=counts))
+}
+
+# Using this function, we read in the counts for the endogenous genes, ERCC spike-ins and mitochondrial genes
+getwd()
+setwd("C:/2 iWorld/0 R Coding for interview/Gene expression/Single-cell analysis of mouse cortex")
+
+# Data from site http://linnarssonlab.org/cortex/
+endo.data <- readFormat("expression_mRNA_17-Aug-2014.txt")
+spike.data <- readFormat("expression_spikes_17-Aug-2014.txt")
+mito.data <- readFormat("expression_mito_17-Aug-2014.txt")
+
+
+# Rearranging the columns for the mitochondrial data, as the order is not consistent with the other files.
+m <- match(endo.data$metadata$cell_id, mito.data$metadata$cell_id)
+mito.data$metadata <- mito.data$metadata[m,]
+mito.data$counts <- mito.data$counts[,m]
+
+#In this particular data set, some genes are represented by multiple rows corresponding to alternative genomic 
+#locations. We sum the counts for all rows corresponding to a single gene for ease of interpretation.
+raw.names <- sub("_loc[0-9]+$", "", rownames(endo.data$counts))
+new.counts <- rowsum(endo.data$counts, group=raw.names, reorder=FALSE)
+endo.data$counts <- new.counts
+
+#The counts are then combined into a single matrix for constructing a SCESet object. 
+#For convenience, metadata for all cells are stored in the same object for later access.
+all.counts <- rbind(endo.data$counts, mito.data$counts, spike.data$counts)
+metadata <- AnnotatedDataFrame(endo.data$metadata)
+
+source("https://bioconductor.org/biocLite.R")
+biocLite("scater")
+# Scater is not available for R 3.2.5 so had to download from link below
+#install.packages("devtools")
+library(devtools)
+devtools::install_github("davismcc/scater", build_vignettes = TRUE)
+
+# https://www.rdocumentation.org/packages/scater/versions/1.0.4
+devtools::install_github("davismcc/scater", ref = "release-R-3.2", build_vignettes = TRUE)
+
+library(scater)
+sce <- newSCESet(countData=all.counts, phenoData=metadata)
+dim(sce)
+
+# We also add annotation identifying rows that correspond to each class of features
+nrows <- c(nrow(endo.data$counts), nrow(mito.data$counts), nrow(spike.data$counts))
+is.spike <- rep(c(FALSE, FALSE, TRUE), nrows)
+is.mito <- rep(c(FALSE, TRUE, FALSE), nrows)
+
+# Low-quality cells prior to data publication. Quality control metrics to check whether the remaining cells are satisfactory
+sce <- calculateQCMetrics(sce, feature_controls=list(Spike=is.spike, Mt=is.mito)) 
+biocLite("scran")
+library(scran)  # error not available for R 3.2.5
+setSpike(sce) <- "Spike"
+
+
+#We examine the distribution of library sizes and numbers of expressed genes across cells (Figure 15).
+par(mfrow=c(1,2))
+hist(sce$total_counts/1e3, xlab="Library sizes (thousands)", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(sce$total_features, xlab="Number of expressed genes", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+
+# We also examine the distribution of the proportions of UMIs assigned to mitochondrial genes or spike-in transcripts
+par(mfrow=c(1,2))
+hist(sce$pct_counts_feature_controls_Mt, xlab="Mitochondrial proportion (%)", 
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+hist(sce$pct_counts_feature_controls_Spike, xlab="ERCC proportion (%)",
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+
+#We remove small outliers in first figurr and large outliers in second figure using a MAD-based threshold as previously described.
+devtools::install_github("davismcc/scater", build_vignettes = TRUE)
+
+libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower", log=TRUE)
+feature.drop <- isOutlier(sce$total_features, nmads=3, type="lower", log=TRUE)
+mito.drop <- isOutlier(sce$pct_counts_feature_controls_Mt, nmads=3, type="higher")
+spike.drop <- isOutlier(sce$pct_counts_feature_controls_Spike, nmads=3, type="higher")
+
+#Removal of low-quality cells is then performed by combining the filters for all of the metrics
+sce <- sce[,!(libsize.drop | feature.drop | spike.drop | mito.drop)]
+data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop), 
+           ByMito=sum(mito.drop), BySpike=sum(spike.drop), Remaining=ncol(sce))
+
+### Cell Cycle Classification
+biocLite("cyclone")
+anno <- select(org.Mm.eg.db, keys=rownames(sce), keytype="SYMBOL", column="ENSEMBL")
+ensembl <- anno$ENSEMBL[match(rownames(sce), anno$SYMBOL)]
+assignments <- cyclone(sce, mm.pairs, gene.names=ensembl)
+plot(assignments$score$G1, assignments$score$G2M, xlab="G1 score", ylab="G2/M score", pch=16)
+
+### Removing uninteresting genes
+#Low-abundance genes are removed by applying a simple mean-based filter
+# We use a lower threshold for UMI counts compared to that used for read counts
+
+ave.counts <- calcAverage(sce)
+keep <- ave.counts >= 0.1
+
+hist(log10(ave.counts), breaks=100, main="", col="grey",
+     xlab=expression(Log[10]~"average count"))
+abline(v=log10(0.1), col="blue", lwd=2, lty=2)
+
+sce <- sce[keep,]
+nrow(sce)
+
+# Some datasets also contain strong heterogeneity in mitochondrial RNA content, possibly due to differences in mitochondrial copy number 
+#or activity between cell types. This heterogeneity will cause mitochondrial genes to dominate the top set of results, 
+#e.g., for identification of correlated HVGs. However, these genes are largely uninteresting given that most studies focus on nuclear regulation. 
+#As such, we filter them out prior to further analysis.
+
+sce <- sce[!fData(sce)$is_feature_control_Mt,]
+
+### Normalization of cell-specific biases
+#Normalization of cell-specific biases is performed using the deconvolution method in the computeSumFactors function
+
+clusters <- quickCluster(sce)
+sce <- computeSumFactors(sce, cluster=clusters)
+
+plot(sizeFactors(sce), sce$total_counts/1e3, log="xy",
+     ylab="Library size (thousands)", xlab="Size factor")
+
+#We also compute size factors specific to the spike-in set
+sce <- computeSpikeFactors(sce, type="Spike", general.use=FALSE)
+
+#Finally, normalized log-expression values are computed for each endogenous gene or spike-in transcript using the appropriate size factors
+sce <- normalize(sce)
+
+
+### Checking for important technical factors
+#In this dataset, factors include the sex of the animal from which the cells were extracted, the age of the animal, 
+#the tissue of origin for each cell, and the total spike-in count in each cell
+
+plotExplanatoryVariables(sce, variables=c("counts_feature_controls_Spike", 
+                                          "log10_counts_feature_controls_Spike", "sex", "tissue", "age")) + fontsize
+
+# We set up a design matrix with the sex of the animal as the explanatory factor for each cell
+design <- model.matrix(~sce$sex)
+
+###Identifying correlated HVGs
+#We identify HVGs that may be involved in driving population heterogeneity. 
+#This is done by fitting a trend to the technical variances for the spike-in transcripts
+
+var.fit.des <- trendVar(sce, trend="loess", span=0.4, design=design)
+var.out.des <- decomposeVar(sce, var.fit.des)
+hvg.out.des <- var.out.des[which(var.out.des$FDR <= 0.05 & var.out.des$bio >= 0.5),]
+nrow(hvg.out.des)
+
+#Alternatively, for data sets containing multiple batches, a more robust strategy is to perform trend fitting and variance decomposition 
+#separately for each batch. This accommodates differences in the mean-variance trends between batches, especially if a different amount of
+#spike-in RNA was added to the cells in each batch. The second approach below by treating each sex as a different "batch" is done
+
+collected <- list()
+for (block in levels(sce$sex)) {
+  cur.sce <- sce[,sce$sex==block]
+  cur.sce <- normalize(cur.sce) 
+  var.fit <- trendVar(cur.sce, trend="loess", span=0.4)
+  collected[[block]] <- decomposeVar(cur.sce, var.fit)
+}
+
+#Variance of normalized log-expression values against the mean for each gene, calculated across all cells from male or female mice 
+
+par(mfrow=c(1,2))
+for (block in c("1", "-1")) { 
+  var.out <- collected[[block]]
+  plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
+       ylab="Variance of log-expression", main=ifelse(block=="1", "Male", "Female"))
+  points(var.out$mean[isSpike(sce)], var.out$total[isSpike(sce)], col="red", pch=16)
+  o <- order(var.out$mean)
+  lines(var.out$mean[o], var.out$tech[o], col="red", lwd=2)
+}
+
+#Statistics are combined across the two sexes using the combineVar function. 
+#HVGs are identified as genes with large positive biological components, and are saved to file for future reference
+
+var.out <- do.call(combineVar, collected)
+hvg.out <- var.out[which(var.out$FDR <= 0.05 & var.out$bio >= 0.5),]
+hvg.out <- hvg.out[order(hvg.out$bio, decreasing=TRUE),] 
+nrow(hvg.out)
+
+write.table(file="brain_hvg.tsv", hvg.out, sep="\t", quote=FALSE, col.names=NA)
+head(hvg.out)
+
+#Violin plots of normalized log-expression values for the top 10 HVGs in the brain dataset
+
+plotExpression(sce, rownames(hvg.out)[1:10], alpha=0.05, jitter="jitter") + fontsize
+
+### Further data exploration with the correlated HVGs
+#We first remove the sex effect using the removeBatchEffect function from the limma package (Ritchie et al. 2015). 
+#This ensures that any sex-specific differences will not dominate the visualization of the expression profiles. 
+#In this manner, we maintain consistency with the use of design in the previous steps. 
+
+library(limma)
+adj.exprs <- exprs(sce)
+adj.exprs <- removeBatchEffect(adj.exprs, batch=sce$sex)
+norm_exprs(sce) <- adj.exprs 
+
+#Dimensionality reduction on the correlated HVGs to check if there is any substructure. 
+#Cells clusters using the t-SNE plot
+
+chosen <- var.cor$gene[sig.cor]
+top.hvg <- rownames(hvg.out)[1]
+tsne1 <- plotTSNE(sce, exprs_values="norm_exprs", colour_by=top.hvg,
+                  perplexity=10, rand_seed=100, feature_set=chosen) + fontsize
+tsne2 <- plotTSNE(sce, exprs_values="norm_exprs", colour_by="Mog",
+                  perplexity=10, rand_seed=100, feature_set=chosen) + fontsize
+multiplot(tsne1, tsne2, cols=2)
+
+#PCA plots constructed from the normalized and corrected log-expression values of correlated HVGs 
+pca1 <- plotPCA(sce, exprs_values="norm_exprs", colour_by=top.hvg) + fontsize
+pca2 <- plotPCA(sce, exprs_values="norm_exprs", colour_by="Mog") + fontsize
+multiplot(pca1, pca2, cols=2)
+
+###Clustering cells into putative subpopulations
+
+#The normalized and sex-adjusted log-expression values for correlated HVGs are used to cluster cells into putative subpopulations. 
+#Hierarchical clustering on the Euclidean distances between cells using Ward's criterion to minimize the total variance within each cluster.
+
+chosen.exprs <- norm_exprs(sce)[chosen,]
+my.dist <- dist(t(chosen.exprs))
+my.tree <- hclust(my.dist, method="ward.D2")
+
+library(dynamicTreeCut)
+my.clusters <- unname(cutreeDynamic(my.tree, distM=as.matrix(my.dist), verbose=0))
+
+# Heatmap of mean-centred normalized and corrected log-expression values for correlated HVGs in the brain dataset. 
+#Dendrograms are formed by hierarchical clustering on the Euclidean distances between genes (row) or cells (column)
+
+heat.vals <- chosen.exprs - rowMeans(chosen.exprs)
+clust.col <- rainbow(max(my.clusters))
+heatmap.2(heat.vals, col=bluered, symbreak=TRUE, trace='none', cexRow=0.3,
+          ColSideColors=clust.col[my.clusters], Colv=as.dendrogram(my.tree), 
+          breaks=seq(-5, 5, length.out=21))
+
+pdf("brain_heat.pdf", width=10, height=100) # Large 'height' to show all gene names.
+heatmap.2(heat.vals, col=bluered, symbreak=TRUE, trace='none', cexRow=0.3,
+          ColSideColors=clust.col[my.clusters], Colv=as.dendrogram(my.tree), 
+          lwid=c(1, 4), lhei=c(1, 50), # Avoid having a very large colour key.
+          breaks=seq(-5, 5, length.out=21))
+dev.off()
+
+# Using the technical components computed with a design matrix.
+pcs <- denoisePCA(sce, design=design, technical=var.fit.des$trend, subset.row=chosen) 
+dim(reducedDimension(pcs)) # Cluster on this instead of t(chosen.exprs)
+
+# Once putative subpopulations are identified by clustering, we can identify marker genes for each cluster using the findMarkers function. 
+#The aim is to test for DE in each cluster compared to the others while blocking on uninteresting factors in design.
+
+markers <- findMarkers(sce, my.clusters, block=design)
+
+marker.set <- markers[["1"]]
+head(marker.set, 10)
+
+# Heatmap of mean-centred normalized and corrected log-expression values for the top set of markers for cluster 1
+write.table(marker.set, file="brain_marker_1.tsv", sep="\t", quote=FALSE, col.names=NA)
+top.markers <- marker.set$Gene[marker.set$Top <= 10]
+top.exprs <- norm_exprs(sce)[top.markers,,drop=FALSE]
+heat.vals <- top.exprs - rowMeans(top.exprs)
+heatmap.2(heat.vals, col=bluered, symbreak=TRUE, trace='none', cexRow=0.6,
+          ColSideColors=clust.col[my.clusters], Colv=as.dendrogram(my.tree), dendrogram='none')
+legend("bottomleft", col=clust.col, legend=sort(unique(my.clusters)), pch=16)
+
+# The SCESet object can also be easily transformed for use in other DE analysis methods. 
+# The convertTo function can be used to construct a DGEList for input into the edgeR pipeline
+
+library(edgeR)
+y <- convertTo(sce, type="edgeR")
+
+saveRDS(file="brain_data.rds", sce)
