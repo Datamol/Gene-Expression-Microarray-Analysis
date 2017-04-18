@@ -1,0 +1,103 @@
+
+
+###############################################
+#### Differential Expression and Filtering ####
+###############################################
+
+#Identifying differentially expressed genes
+
+#Differentially expressed genes can be naively determined by fold changes but more effectively determined by using a 
+#statistic such as the t test
+
+exprSet = read.delim("Su_mas5_matrix.txt")
+# Check how the chips are named
+colnames(exprSet)
+
+#Use the t test for one gene to determine if the data on fetal and adult expression are different in the brain and/or liver.
+#We'll use the command "t.test" to perform Welch's test (not assuming an equal variance between samples) on the data for one gene (probset).
+#We're safer by not assuming that each genes exhibits the same variance in each tissue, but we do lose some statistical power.
+#The two-sample t-test takes at least three arguments: the first dataset, the second dataset, and an indication of the number of tails.
+#For 2 tails, we'll state "two.sided", since one tissue can have an expression that is lower or higher than the other.
+#The command to compare adult brain to fetal brain for the first gene is
+dataset.1 = exprSet[1, c(1,2)] #"brain.1", "brain.2"
+dataset.2 = exprSet[1, c(3,4)] #"fetal.brain.1", "fetal.brain.2"
+t.test.gene.1 = t.test(dataset.1, dataset.2, "two.sided")
+# Let's see what these data are
+dataset.1
+dataset.2
+# Print just the p-value from the t-test
+t.test.gene.1$p.value  #0.2316246
+
+#Use the t test to test for a difference in means with all genes. Note the second argument is "1", 
+#showing that we want to apply the t-test command across rows (genes/probesets)
+brain.p.value.all.genes = apply(exprSet, 1, function(x) { t.test(x[1:2], x[3:4]) $p.value } )
+liver.p.value.all.genes = apply(exprSet, 1, function(x) { t.test(x[5:6], x[7:8]) $p.value } )
+# Check the first few brain ones to make sure the first one agrees with our single-gene command
+brain.p.value.all.genes[1:5]
+
+#Use the "Absent/Present" calls from the Affymetrix algorithm to flag genes with questionable expression levels.
+#In the process of converting probe data into one probeset measurement, Affymetrix calculates p-values preflecting confidence that the gene is present in the sample, 
+#and these are used to classify each probeset as Absent, Present, or Marginal.
+#We don't want to spend our energy looking at expression intensities of genes that might change from close to zero to a larger intensity still close to zero (or vice versa).
+#Our current task is to flag all genes that are have "Absent" calls in all brain samples or in all liver samples, using the original data in the "ap" sheet.
+#One way to do this is to merge the calls into one cell and then test if it's "AAAA".
+#Read the A/P calls you calculated Su_mas5calls.txt file
+
+data.mas5calls.calls = read.delim("Su_mas5calls.txt")
+
+#Concatenate all A/P calls for brain and liver
+# Example for one gene
+AP.gene.1 = paste(data.mas5calls.calls[1,], collapse="")
+# For all genes
+AP = apply(data.mas5calls.calls, 1, paste, collapse="")
+
+# Sort data and remove non-expressed probesets.
+#To filter out uninformative data, select only rows (genes/probesets) for probesets which are expressed in no brain or liver hybridizations. 
+#This will also help reduce the corrections necessary for multiple hypothesis testing.
+#Get the probsets where the 4 calls are not "AAAA"
+genes.present = names(AP[AP != "AAAAAAAA"])
+
+# How many probetset/genes are present?
+length(genes.present) # 7924
+#Get all data for probesets that are present on at least on chip.
+exprSet.present = exprSet[genes.present,]
+
+#Correct t-test p-values for multiple hypothesis testing by calculating the False Discovery Rate (FDR)
+#Note that the actual p-values representing confidence for differential expression are raw values. 
+#If they were to be corrected for multiple hypothesis testing (since were doing lots of t-tests), they'd be much higher.
+#We can start to calculate FDR for the brain data:
+#Start by getting a list of all raw p-values (from the t-test) of the present genes
+brain.raw.pvals.present = brain.p.value.all.genes[genes.present]
+liver.raw.pvals.present = liver.p.value.all.genes[genes.present]
+
+#Use this list of p-values to get a corresponding list of FDR p-values.
+brain.fdr.pvals.present = p.adjust(brain.raw.pvals.present, method="fdr")
+liver.fdr.pvals.present = p.adjust(liver.raw.pvals.present, method="fdr")
+#Sort all of our FDR_corrected p-values to get lowest values
+brain.fdr.pvals.present.sorted = brain.fdr.pvals.present[order(brain.fdr.pvals.present)]
+liver.fdr.pvals.present.sorted = liver.fdr.pvals.present[order(liver.fdr.pvals.present)]
+# Look at the 10 lowest p-values
+brain.fdr.pvals.present.sorted[1:10]
+liver.fdr.pvals.present.sorted[1:10]
+#While you have all the data, print the expression matrix together with the raw and FDR p-values for all the "present" genes
+expression.plus.pvals = cbind(exprSet.present, brain.raw.pvals.present, 
+brain.fdr.pvals.present, liver.raw.pvals.present, liver.fdr.pvals.present)
+write.table(expression.plus.pvals, "Su_mas5_DE_analysis.txt", sep="\t", quote=F)
+#For this dataset with only two replicates, you'll find that no p-values corrected by FDR come close to a usual p-value threshold for significance
+
+#List all the gene IDs for those that meet your significance threshold (such as raw p < 0.01) and are present in at least one sample.
+#Get 2 lists (one for each tissue) of gene IDs that have a raw p-value < 0.01 and are "present" on at least one chip.
+brain.DE.probesets = names(brain.raw.pvals.present[brain.raw.pvals.present < 0.01])
+liver.DE.probesets = names(liver.raw.pvals.present[liver.raw.pvals.present < 0.01])
+
+#Get the expression data (log2 ratios) for these probesets (separate datasets for brain and liver).
+# Read the big file we created at the end of last class
+all.data = read.delim("Microarray_Analysis_data_1_SOLUTION.txt")
+# Get the log2 ratios for the probesets (rows we want)
+brain.DE.log2.ratios = all.data[brain.DE.probesets, c("brain.fetal.to.adult", "liver.fetal.to.adult")]
+liver.DE.log2.ratios = all.data[liver.DE.probesets, c("brain.fetal.to.adult", "liver.fetal.to.adult")]
+#Print these selected matrices as files.
+write.table(brain.DE.log2.ratios, "brain.DE.log2.ratios.txt", sep="\t", quote=F)
+write.table(liver.DE.log2.ratios, "liver.DE.log2.ratios.txt", sep="\t", quote=F)
+
+# Use the Compare two lists tool (http://jura.wi.mit.edu/bioc/tools/compare.php) to get the non-redundant union of these lists
