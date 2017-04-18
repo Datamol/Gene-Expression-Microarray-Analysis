@@ -1,0 +1,63 @@
+
+#######################
+#### Visualization ####
+#######################
+
+#Start by reading the output of your analysis from the first class
+#all.data = read.delim("Microarray_Analysis_data_1_SOLUTION.txt")
+
+#Look at all the data you have and select two columns of expression values
+colnames(all.data)
+x.data = all.data[, "brain.mean"]
+y.data = all.data[, "fetal.brain.mean"]
+#Do a basic scatterplot
+plot(x.data, y.data)
+#Add some more options to your figure
+plot(x.data, y.data, main = "Log2 expression in fetal brain (n=2) vs adult brain (n=2)",
+     xlab="brain", ylab="fetal brain", col="blue", cex=0.5)
+
+#R-I (M-A) plot 
+#A "ratio-intensity plot" looks like a scatterplot that has been rotated 45 degrees.
+#It's the most common plot associated with lowess normalization.
+#After choosing the two columns of data you wish to compare, begin by calculating "M" and "A" for each expression value.
+#A = mean intensity = 1/2 * log2(experiment 1 * experiment 2)
+#M = log2 ratio = log2(experiment 1 / experiment 2)
+#but since the exprssion values have already been log2-transformed, we can add and substract instead.
+brain = all.data[, "brain.mean"]
+fetal.brain = all.data[, "fetal.brain.mean"]
+A = (fetal.brain + brain) / 2
+M = fetal.brain - brain
+#Use the same plot command as for a scatterplot (above).
+plot(A, M)
+plot(A, M, main="MA plot of fetal brain vs brain", pch=19, cex=0.2, col="red")
+
+# Volcano plot
+#These plots will help compare two methods for determination of differential expression: fold changes and t tests.
+#The x-axis is the ratio between two tissues and the y-axis is the p-value from the t test from the same two tissues.
+#Start by reading the expression and t-test p-values and choosing a tissue.
+expression.plus.pvals = read.delim("Su_mas5_DE_analysis.txt")
+log2.ratios = expression.plus.pvals[, 1] -  expression.plus.pvals[, 3] #"brain.1" and "fetal.brain.1"
+p.values = expression.plus.pvals[, 9] #"brain.raw.pvals.present"
+#Plot the log2 ratios vs the negative of the log-transformed p-values
+plot(log2.ratios, -log(p.values, 10) )
+
+
+#### Functional analysis
+
+#Annotation (Excel and web tools)
+# Download the array annotation file for the Affymetrix U95 chip used in this experiment.
+#This file contains seleced fields downloaded from the Affymetrix chips support page.
+#Read the annotation file
+anno = read.delim("HG_U95Av2_anno.txt")
+
+#Select the data about one of your lists of differentially expressed genes
+# If you don't have your lists from last class in memory, get them
+brain.DE.probesets = read.delim("http://jura.wi.mit.edu/bio/education/bioinfo2007/arrays/brain.DE.probesets.txt")
+liver.DE.probesets = read.delim("http://jura.wi.mit.edu/bio/education/bioinfo2007/arrays/liver.DE.probesets.txt")
+brain.DE.anno = anno[brain.DE.probesets[,1],]
+liver.DE.anno = anno[liver.DE.probesets[,1],]
+# This table is so wide a graphical view is much better
+edit(brain.DE.anno)
+#Print the annotation for your gene lists
+write.table(brain.DE.anno, "brain.DE.anno.txt", sep="\t", quote=F)
+write.table(liver.DE.anno, "liver.DE.anno.txt", sep="\t", quote=F)
